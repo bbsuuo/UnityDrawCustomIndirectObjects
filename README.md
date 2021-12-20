@@ -12,3 +12,4 @@
 ![image](https://user-images.githubusercontent.com/35555275/146745425-cb3e8d8e-2ce9-4f0c-8f4d-8788a571490d.png)
 ![image](https://user-images.githubusercontent.com/35555275/146745455-e6c3d8a0-c92e-4dd3-8538-a806300f3fa5.png)
 
+部分实现参考了： https://github.com/ellioman/Indirect-Rendering-With-Compute-Shaders 和 https://zhuanlan.zhihu.com/p/396979267#comment-10019966137?notificationId=1455556800368558080
