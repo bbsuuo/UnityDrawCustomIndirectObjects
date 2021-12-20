@@ -1,0 +1,174 @@
+#pragma kernel PositionCalculate
+#pragma kernel CullingCalculate
+
+#include "IndirectUtilities.hlsl"
+
+#pragma multi_compile __ EnableCulling 
+#pragma multi_compile __ EnableWithHZCulling
+
+uint _HZCullingEnable;
+uint _ShouldCulling;
+uint _ShouldHZCulling;
+//Matrix4x4 v = Camera.main.worldToCameraMatrix;
+//Matrix4x4 p = Camera.main.projectionMatrix; 
+float4x4 _VPMatrix;
+//transform.localtoworld
+float4x4 _LocalToWorld;
+float4x4 _WorldToLocal;
+float3 _CamPosition;
+
+//Random
+uint randomSeed;
+float2 rotationX;
+float2 rotationY;
+float2 rotationZ;
+
+//整体的包围盒
+float4 minBound; //min:xyz  random minScale:w
+float4 maxBound; //max:xyz  random maxScale:w
+
+//网格包围盒
+float3 meshBoundsCenter;
+float3 meshBoundsExtents;
+ 
+
+//用于计算位置的数据,用于根据参数初始化信息  position: xyz, scale : w
+RWStructuredBuffer<float4x4> _Positions;
+//计算完剪裁后所有需要渲染的ID , 通过该数量调用渲染接口
+AppendStructuredBuffer<uint> _VisibleInstanceIds; 
+
+#define PI 3.1415926
+#define Deg2Rad (PI*2)/360
+
+//在UpdateBuffer时计算所有实例的初始数据位置
+[numthreads(8,1,1)]
+void PositionCalculate (uint3 id : SV_DispatchThreadID)
+{
+    int index = id.x;
+    randomState = randomState + (index * 1000) ;
+   
+    float3 minPoint = minBound.xyz;
+    float3 maxPoint = maxBound.xyz;
+    float2 minMaxScale = float2(minBound.w,maxBound.w);
+
+    float x = random(minPoint.x,maxPoint.x);
+    float y = random(minPoint.y,maxPoint.y);
+    float z = random(minPoint.z,maxPoint.z);
+    float scale = random(minMaxScale.x,minMaxScale.y);
+ 
+
+    //Calculate random Rotation
+    float radX  = random(rotationX.x,rotationX.y) * Deg2Rad;
+    float radY  = random(rotationY.x,rotationY.y) * Deg2Rad;
+    float radZ  = random(rotationZ.x,rotationZ.y) * Deg2Rad;
+
+    float sinX = sin(radX);
+    float cosX = cos(radX);
+    float sinY = sin(radY);
+    float cosY = cos(radY);
+    float sinZ = sin(radZ);
+    float cosZ = cos(radZ);
+
+    float4x4 tMat = float4x4(
+        float4(1,0,0,x),
+        float4(0,1,0,y),
+        float4(0,0,1,z),
+        float4(0,0,0,1)
+    );
+    float4x4 sMat = float4x4(
+        float4(scale,0,0,0),
+        float4(0,scale,0,0),
+        float4(0,0,scale,0),
+        float4(0,0,0,1)
+
+    );
+    float4x4 rMat = float4x4(
+        float4(cosY * cosZ,cosX * sinZ + sinX * sinY * cosZ,sinX * sinZ - cosX * sinY * cosZ,0),
+        float4(-cosY * sinZ,cosX * cosZ - sinX * sinY * sinZ,sinX * cosZ + cosX * sinY * sinZ,0),
+        float4(sinY,-sinX * cosY,cosX * cosY,0),     
+        float4(0,0,0,1)
+    );
+
+    float4x4 trsMat =   mul(mul(tMat ,rMat), sMat) ;
+    _Positions[index] = trsMat;//float4(x,y,z,scale);
+}
+
+//在UpdateRenderer时计算剪裁,算出需要渲染的数量以及ID
+[numthreads(8,1,1)]
+void CullingCalculate (uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    #ifndef EnableCulling
+       _VisibleInstanceIds.Append(index);
+       return;
+    #endif
+
+    float4x4 trsMat = _Positions[index];
+    float3 positionSubWS =   float3(trsMat[0][3],trsMat[1][3],trsMat[2][3]); //mul(trsMat,float4(0,0,0,1)).xyz; // world position
+    float3 positionSubBS =   mul(_LocalToWorld,  float4(positionSubWS,1)).xyz; // to render bound position
+    float distanceToCamera = distance(positionSubWS,_CamPosition);
+ 
+    // Check if the instance is visible for frusum culling
+    float3 boundMin  = (meshBoundsCenter - meshBoundsExtents);//+ positionSubWS;
+    float3 boundMax  = (meshBoundsCenter + meshBoundsExtents);// + positionSubWS;
+    float3 minPos = boundMin + positionSubWS;
+    float3 maxPos = boundMax + positionSubWS;
+ 
+
+    float4 boxCorners[8];
+    boxCorners[0] = mul(_LocalToWorld,float4(mul(trsMat,float4(boundMin ,1)).xyz ,1));// mul(trsMat,float4(boundMin ,1)); //float4(minPos.x, minPos.y, minPos.z, 1.0);
+    boxCorners[1] = mul(_LocalToWorld,float4( mul(trsMat,float4(boundMax ,1)).xyz ,1));// mul(trsMat,float4(boundMax ,1)); //float4(minPos.x, minPos.y, maxPos.z, 1.0);
+    boxCorners[2] = mul(_LocalToWorld,float4( mul(trsMat,float4(boundMax.x, boundMax.y, boundMin.z, 1)).xyz,1));// mul(trsMat,float4(boundMax.x, boundMax.y, boundMin.z, 1)); //float4(minPos.x, maxPos.y, minPos.z, 1.0);
+    boxCorners[3] = mul(_LocalToWorld,float4( mul(trsMat,float4(boundMax.x, boundMin.y, boundMax.z, 1)).xyz,1));// mul(trsMat,float4(boundMax.x, boundMin.y, boundMax.z, 1)); //float4(minPos.x, maxPos.y, maxPos.z, 1.0);
+    boxCorners[4] = mul(_LocalToWorld,float4( mul(trsMat,float4(boundMax.x, boundMin.y, boundMin.z, 1)).xyz,1));// mul(trsMat,float4(boundMax.x, boundMin.y, boundMin.z, 1));//float4(maxPos.x, minPos.y, minPos.z, 1.0);
+    boxCorners[5] = mul(_LocalToWorld,float4( mul(trsMat,float4(boundMin.x, boundMax.y, boundMax.z, 1)).xyz,1));// mul(trsMat,float4(boundMin.x, boundMax.y, boundMax.z, 1)); //float4(maxPos.x, minPos.y, maxPos.z, 1.0);
+    boxCorners[6] = mul(_LocalToWorld,float4( mul(trsMat,float4(boundMin.x, boundMax.y, boundMin.z, 1)).xyz,1));// mul(trsMat,float4(boundMin.x, boundMax.y, boundMin.z, 1)); //float4(maxPos.x, maxPos.y, minPos.z, 1.0);
+    boxCorners[7] = mul(_LocalToWorld,float4( mul(trsMat,float4(boundMin.x, boundMin.y, boundMax.z, 1)).xyz,1));// mul(trsMat,float4(boundMin.x, boundMin.y, boundMax.z, 1)); //float4(maxPos.x, maxPos.y, maxPos.z, 1.0);
+
+ 
+
+    float4 clipPos = mul(_VPMatrix, boxCorners[0]);
+    uint isInFrustum = IsVisibleAfterFrustumCulling(clipPos); 
+
+    clipPos.xyz = clipPos.xyz / clipPos.w;
+    float clipMinX = clipPos.x;
+    float clipMaxX = clipPos.x;
+    float clipMinY = clipPos.y;
+    float clipMaxY = clipPos.y;
+    float clipMinZ = clipPos.z;
+
+    [unroll]
+    for (int i = 1; i < 8; i++)
+    {
+        clipPos = mul(_VPMatrix, boxCorners[i]);
+        isInFrustum = saturate(isInFrustum + IsVisibleAfterFrustumCulling(clipPos));
+
+         // For HiZ
+        clipPos.xyz = clipPos.xyz / clipPos.w;
+        clipMinX = min(clipPos.x, clipMinX);
+        clipMaxX = max(clipPos.x, clipMaxX);
+        clipMinY = min(clipPos.y, clipMinY);
+        clipMaxY = max(clipPos.y, clipMaxY);
+        clipMinZ = min(clipPos.z, clipMinZ);
+    }
+
+    uint isVisible = 1; 
+    if (IsCameraOutsideObjBounds(_CamPosition, minPos, maxPos))
+    {
+        // Do we pass the frustum culling...?
+        isVisible *=  isInFrustum;
+        //_ShouldOcclusionCull
+
+        #ifdef EnableWithHZCulling
+        // Do we pass the occlusion culling...?
+        isVisible *=  IsVisibleAfterOcclusionCulling(clipMinX, clipMaxX, clipMinY, clipMaxY, clipMinZ);
+        #endif
+        //isVisible *=  IsVisibleAfterOcclusionCulling(clipMinX, clipMaxX, clipMinY, clipMaxY, clipMinZ);
+    }
+
+    if(isVisible == 1)
+    {
+        _VisibleInstanceIds.Append(index);
+    }
+}
+
